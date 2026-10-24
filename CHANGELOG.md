@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-25
+
+The pin moves to invisible-core 53.48.0, which brings the firefox-53 engine.
+
+### Fixed
+- After a page that runs in a content process of its own (served with
+  Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy, as challenge
+  pages are) sends itself to a page that does not, locators, `inner_text` and
+  `query_selector` no longer fail for good with "Cannot find object with id"
+  when a read was made on the first page. The engine's context ids are now
+  unique for the session, and an element handle kept across such a move can no
+  longer reach a different node.
+
+### Changed
+- The exposed fonts are the set of a clean Windows: Leelawadee, Microsoft
+  Uighur, Wingdings 2 and Wingdings 3, which such a machine does not have, are
+  no longer exposed (67 families).
+
+### Tests
+- e2e: reads on an isolated page, then on the page it sends itself to.
+- The font gate checks that the engine's own manifest declares exactly the
+  canonical families, none more and none less.
+
 ## [0.42.0] - 2026-10-24
 
 The pin moves to invisible-core 52.48.0, which brings the firefox-52 engine.
