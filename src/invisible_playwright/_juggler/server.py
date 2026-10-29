@@ -1731,7 +1731,7 @@ class FrameDispatcher(Dispatcher):
         """
         selector = params.get("selector")
         if selector:
-            return self._read(params, "ariaSnapshot",
+            return self._read({**params, "strict": True}, "ariaSnapshot",
                               {"mode": params.get("mode") or "raw"})
         return {"snapshot": self.injected.call(
             self.frame_id,
@@ -2444,14 +2444,14 @@ class PageDispatcher(Dispatcher):
         initializer = {"mainFrame": self.frame.channel,
                        "viewportSize": viewport, "isClosed": False,
                        "pageNumber": self.number}
-        if opener is not None:
-            # ⛔ THE OPENER TRAVELS IN THE INITIALIZER, and nowhere else. The
-            # client resolves `page.opener()` from it and emits `popup` on the
-            # opener when the context announces the page - so a page built
-            # without it is tracked but orphaned: present in `context.pages`
-            # while its opener never fires `popup` and `opener()` is None.
-            initializer["opener"] = opener.channel
-        super().__init__(server, context, initializer)
+        # Adoption can finish after its opener closes. Publish the reference
+        # under the same lock as the opener's close/dispose messages: otherwise
+        # the client receives a GUID it has already removed and cannot build
+        # this Page. An already closed opener has no public opener relation.
+        with opener._close_lock if opener is not None else contextlib.nullcontext():
+            if opener is not None and not opener._announced_closed:
+                initializer["opener"] = opener.channel
+            super().__init__(server, context, initializer)
         self.emit("__adopt__", {"guid": self.frame.guid})
         self.frame.parent = self
         # ⛔ AFTER the Page exists: an event that fires during construction

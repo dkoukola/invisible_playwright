@@ -109,6 +109,10 @@ class InProcessTransport(Transport):
         super().__init__(loop)
         self._server = server
         self._queue: queue.Queue = queue.Queue()
+        # Closing a page releases blocked navigation/evaluation work. It must
+        # not wait for a slot occupied by that same work. Keep one bounded
+        # close worker, with the ordinary protocol dispatch/reply semantics.
+        self._close_queue: queue.Queue = queue.Queue()
         self._stopped = threading.Event()
         self._stopped_future: asyncio.Future = loop.create_future()
         self._threads: list = []
@@ -144,11 +148,12 @@ class InProcessTransport(Transport):
         """Run `fn(*args)` on this transport's OWN worker pool; return an
         awaitable that resolves on the LOOP once it is done.
 
-        ⛔ THE SAME POOL AS EVERY CHANNEL MESSAGE, on purpose: a fused type's
+        ⛔ THE SAME POOL AS ORDINARY CHANNEL MESSAGES: a fused type's
         blocking call and a channel-routed call must never be able to starve
         each other by running on separate pools with separate limits. `_work`
         below accepts a plain callable exactly as it accepts a message dict,
-        from the SAME queue, serviced by the SAME four threads.
+        from the SAME four-worker queue, except that terminal close messages
+        have reserved admission so they can release blocked ordinary work.
 
         ⛔ AND THE EXCEPTION IS TRANSLATED, not passed through raw. `fn` runs
         `_juggler` code and can raise `_juggler.dispatcher.TargetClosedError` -
@@ -195,8 +200,10 @@ class InProcessTransport(Transport):
 
     # ── the five methods the seam declares ──────────────────────────────────
     async def connect(self) -> None:
-        for i in range(self.WORKERS):
-            t = threading.Thread(target=self._work, name="juggler-%d" % i,
+        queues = [self._queue] * self.WORKERS + [self._close_queue]
+        for i, work_queue in enumerate(queues):
+            t = threading.Thread(target=self._work, args=(work_queue,),
+                                 name="juggler-%d" % i,
                                  daemon=True)
             t.start()
             self._threads.append(t)
@@ -212,8 +219,9 @@ class InProcessTransport(Transport):
         self._stopped.set()
         # One sentinel per worker: a thread blocked on `get()` does not notice
         # a flag.
-        for _ in self._threads:
+        for _ in range(self.WORKERS):
             self._queue.put(None)
+        self._close_queue.put(None)
         try:
             self._server.shutdown()
         except Exception:
@@ -233,18 +241,19 @@ class InProcessTransport(Transport):
     def send(self, message: Dict) -> None:
         """⛔ ENQUEUE ONLY. Running the operation here would run it on the
         event loop, and every Juggler operation blocks."""
-        self._queue.put(message)
+        work_queue = self._close_queue if message.get("method") == "close" else self._queue
+        work_queue.put(message)
 
     # ── the worker side ─────────────────────────────────────────────────────
-    def _work(self) -> None:
+    def _work(self, work_queue: queue.Queue) -> None:
         while True:
-            item = self._queue.get()
+            item = work_queue.get()
             if item is None:
                 return
             # ⛔ A PLAIN CALLABLE IS A JOB FROM `run_blocking`, and a dict is a
-            # channel message: the same queue, the same four threads, told
-            # apart by shape rather than by a second queue that would split
-            # the pool in two.
+            # channel message. Ordinary channel and fused calls share their
+            # four-worker queue; only terminal close uses reserved admission.
+            # Both queues retain the same dispatch and reply behavior.
             if callable(item):
                 item()
                 continue
